@@ -1,0 +1,19 @@
+{
+  "name": "hato",
+  "displayName": "hato 🕊",
+  "version": "0.4.1",
+  "description": "Carrier-pigeon messaging between Claude Code sessions — send, broadcast, and get woken up by other sessions across your machines",
+  "author": {
+    "name": "severzemlya",
+    "email": "ta@4682.info"
+  },
+  "repository": "https://github.com/severzemlya/hato",
+  "keywords": ["messaging", "sessions", "channel", "multi-agent"],
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": {
+    "hato": {
+      "command": "bun",
+      "args": ["run", "${CLAUDE_PLUGIN_ROOT}/dist/channel.js"]
+    }
+  }
+}

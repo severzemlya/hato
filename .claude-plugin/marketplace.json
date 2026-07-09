@@ -1,0 +1,17 @@
+{
+  "name": "hato",
+  "owner": {
+    "name": "severzemlya",
+    "email": "ta@4682.info"
+  },
+  "description": "Marketplace for the hato plugin (this repo is both the marketplace and the plugin)",
+  "plugins": [
+    {
+      "name": "hato",
+      "source": "./",
+      "description": "Carrier-pigeon messaging between Claude Code sessions",
+      "category": "productivity",
+      "tags": ["messaging", "sessions", "channel", "multi-agent"]
+    }
+  ]
+}

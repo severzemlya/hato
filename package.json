@@ -1,0 +1,14 @@
+{
+  "name": "hato",
+  "version": "0.4.1",
+  "description": "Carrier-pigeon messaging between Claude Code sessions",
+  "type": "module",
+  "scripts": {
+    "hub": "bun hub/hub.ts",
+    "channel": "bun channel/server.ts",
+    "build": "bun build channel/server.ts --target=bun --outfile=dist/channel.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

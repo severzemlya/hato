@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "hato-spike": {
+      "command": "bun",
+      "args": ["run", "./spike/server.ts"]
+    }
+  }
+}

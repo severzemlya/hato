@@ -1,0 +1,8 @@
+node_modules/
+*.db
+*.db-*
+spike/inbox.txt
+spike/outbox.txt
+spike/spike.log
+spike/claude-stderr.log
+spike/testground/
