@@ -11,7 +11,9 @@
  *     POST /api/activity  {host, claude_pid, state}  working/idle reports from hooks
  *     GET  /healthz
  * - Ledger and inbox persist in SQLite (~/.local/share/hato/hato.db)
- * - No auth: meant to be reachable only from loopback / inside a Tailnet
+ * - Auth: optional shared token. Set HATO_TOKEN and every /api and /ws request
+ *   must carry `Authorization: Bearer <token>` (/healthz stays open).
+ *   Still meant to be reachable only from loopback / inside a Tailnet.
  */
 
 import { Database } from 'bun:sqlite'
@@ -24,6 +26,7 @@ const PORT = Number(process.env.HATO_PORT ?? DEFAULT_PORT)
 const DATA_DIR = process.env.HATO_DATA_DIR ?? join(homedir(), '.local', 'share', 'hato')
 const MSG_TTL_DAYS = Number(process.env.HATO_MSG_TTL_DAYS ?? 7)
 const SESSION_TTL_DAYS = Number(process.env.HATO_SESSION_TTL_DAYS ?? 14)
+const TOKEN = process.env.HATO_TOKEN // when set, /api and /ws require Authorization: Bearer <token>
 mkdirSync(DATA_DIR, { recursive: true })
 
 const db = new Database(join(DATA_DIR, 'hato.db'))
@@ -286,12 +289,15 @@ const server = Bun.serve<WsData, {}>({
   hostname: process.env.HATO_HOST ?? '0.0.0.0',
   fetch(req, srv) {
     const url = new URL(req.url)
+    if (url.pathname === '/healthz') return new Response('ok')
+    if (TOKEN && req.headers.get('authorization') !== `Bearer ${TOKEN}`) {
+      return new Response('unauthorized', { status: 401 })
+    }
     if (url.pathname === '/ws') {
       return srv.upgrade(req, { data: {} })
         ? undefined
         : new Response('upgrade failed', { status: 400 })
     }
-    if (url.pathname === '/healthz') return new Response('ok')
     if (url.pathname.startsWith('/api/')) {
       return handleApi(req, url).catch(err => json({ error: String(err) }, 500))
     }

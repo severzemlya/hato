@@ -1,6 +1,6 @@
 {
   "name": "hato",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Carrier-pigeon messaging between Claude Code sessions",
   "type": "module",
   "scripts": {

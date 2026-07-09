@@ -69,14 +69,22 @@ bun run hub                      # or install it as a service, see below
 <details>
 <summary>systemd user service</summary>
 
+```bash
+# ~/.config/hato/env  (chmod 600)
+HATO_HOST=<loopback or Tailscale IP>
+HATO_TOKEN=<openssl rand -hex 16>
+```
+
 ```ini
 # ~/.config/systemd/user/hato-hub.service
 [Unit]
 Description=hato hub
 
 [Service]
+EnvironmentFile=%h/.config/hato/env
 ExecStart=%h/.bun/bin/bun %h/work/hato/hub/hub.ts
-Restart=on-failure
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=default.target
@@ -84,6 +92,7 @@ WantedBy=default.target
 
 ```bash
 systemctl --user enable --now hato-hub
+loginctl enable-linger        # keep it running while logged out
 ```
 </details>
 
@@ -167,7 +176,8 @@ to `chat_id` with `hato_send` closes the loop.
 |---|---|---|
 | `HATO_HUB` | `http://127.0.0.1:8790` | hub address, for channels and CLI |
 | `HATO_NAME` | *(random bird)* | requested session name |
-| `HATO_PORT` / `HATO_HOST` | `8790` / `0.0.0.0` | hub bind |
+| `HATO_PORT` / `HATO_HOST` | `8790` / `0.0.0.0` | hub bind — prefer the loopback or Tailscale IP; `/hato:setup` asks |
+| `HATO_TOKEN` | *(unset = open)* | shared token; when set on the hub, `/api` and `/ws` require `Authorization: Bearer` — export the same value on every machine |
 | `HATO_DATA_DIR` | `~/.local/share/hato` | hub SQLite location |
 | `HATO_MSG_TTL_DAYS` | `7` | messages older than this are swept |
 | `HATO_SESSION_TTL_DAYS` | `14` | offline session rows older than this are swept |
@@ -176,8 +186,9 @@ to `chat_id` with `hato_send` closes the loop.
 
 - **Experimental API.** The `claude/channel` capability is undocumented and may change
   with any Claude Code release. If it breaks, diff against the official Discord plugin.
-- **No auth.** The hub trusts its network. Keep it on loopback / inside a Tailnet;
-  never expose the port publicly.
+- **Minimal auth.** `HATO_TOKEN` is a single shared secret — enough to keep LAN
+  neighbours out, not a real authorization model. Keep the hub on loopback / inside
+  a Tailnet and bind it narrowly; never expose the port publicly.
 - **A message is a turn.** Each delivery spends a turn in the receiving session. Don't spam.
 - **`--channels` is per-launch.** With the plugin enabled, every session registers in the
   ledger and can *send*; only sessions launched with `--channels plugin:hato@hato`

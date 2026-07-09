@@ -11,12 +11,16 @@
  *
  * The hub address comes from $HATO_HUB (default http://127.0.0.1:8790).
  * From another host: HATO_HUB=http://<hub-host>:8790 hato list
+ * If the hub sets HATO_TOKEN, export the same HATO_TOKEN here.
  */
 
 import { hostname } from 'os'
 import { BROADCAST, DEFAULT_PORT, type MessageRow, type SessionRow } from '../shared/proto.ts'
 
 const HUB = (process.env.HATO_HUB || `http://127.0.0.1:${DEFAULT_PORT}`).replace(/\/$/, '')
+const AUTH: Record<string, string> = process.env.HATO_TOKEN
+  ? { authorization: `Bearer ${process.env.HATO_TOKEN}` }
+  : {}
 
 const USAGE = `usage:
   hato list                     list sessions
@@ -34,11 +38,14 @@ function fail(msg: string): never {
 }
 
 async function api(path: string, init?: RequestInit): Promise<Response> {
+  let res: Response
   try {
-    return await fetch(`${HUB}${path}`, init)
+    res = await fetch(`${HUB}${path}`, { ...init, headers: { ...AUTH, ...(init?.headers as Record<string, string>) } })
   } catch {
     fail(`cannot reach hub (${HUB}) — start it with 'hato hub' or check HATO_HUB`)
   }
+  if (res.status === 401) fail(`hub (${HUB}) rejected the request — export the hub's HATO_TOKEN`)
+  return res
 }
 
 const post = (path: string, body: unknown) =>
@@ -123,7 +130,7 @@ switch (cmd) {
     try {
       await fetch(`${HUB}/api/activity`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...AUTH },
         body: JSON.stringify({ host: hostname(), claude_pid: Number(pid), state }),
         signal: AbortSignal.timeout(2000),
       })

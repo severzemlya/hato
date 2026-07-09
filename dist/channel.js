@@ -14075,11 +14075,12 @@ var DEFAULT_PORT = 8790;
 // channel/server.ts
 var HUB = (process.env.HATO_HUB || `http://127.0.0.1:${DEFAULT_PORT}`).replace(/\/$/, "");
 var HUB_WS = HUB.replace(/^http/, "ws") + "/ws";
+var AUTH = process.env.HATO_TOKEN ? { authorization: `Bearer ${process.env.HATO_TOKEN}` } : {};
 var SESSION_ID = randomUUID();
 var assignedName = process.env.HATO_NAME ?? null;
 var log = (msg) => process.stderr.write(`hato channel: ${msg}
 `);
-var mcp = new Server({ name: "hato", version: "0.4.1" }, {
+var mcp = new Server({ name: "hato", version: "0.5.0" }, {
   capabilities: {
     tools: {},
     experimental: { "claude/channel": {} }
@@ -14156,7 +14157,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     case "hato_send": {
       const res = await fetch(`${HUB}/api/send`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...AUTH },
         body: JSON.stringify({ to: args.to, from: assignedName ?? "unregistered", content: args.text })
       });
       const body = await res.json();
@@ -14167,7 +14168,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       return text(body.result === "delivered" ? "delivered (recipient is online)" : "queued (recipient is offline \u2014 will be delivered when it comes back)");
     }
     case "hato_list": {
-      const res = await fetch(`${HUB}/api/sessions`);
+      const res = await fetch(`${HUB}/api/sessions`, { headers: AUTH });
       const { sessions } = await res.json();
       if (sessions.length === 0)
         return text("no sessions registered");
@@ -14181,7 +14182,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     case "hato_rename": {
       const res = await fetch(`${HUB}/api/rename`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...AUTH },
         body: JSON.stringify({ from: assignedName, to: args.name })
       });
       const body = await res.json();
@@ -14201,7 +14202,7 @@ function wsSend(msg) {
     ws.send(JSON.stringify(msg));
 }
 function connectHub() {
-  ws = new WebSocket(HUB_WS);
+  ws = new WebSocket(HUB_WS, { headers: AUTH });
   ws.onopen = () => {
     backoffMs = 1000;
     wsSend({

@@ -24,16 +24,21 @@ Collect all of this quietly, then present one status summary:
 3. **Hub** — determine the effective hub URL: `$HATO_HUB` if set, else
    `http://127.0.0.1:8790`. Probe it: `curl -sf --max-time 2 <url>/healthz`.
    Also check for a local service: `systemctl --user is-active hato-hub`.
-4. **Allowlist** — read `/etc/claude-code/managed-settings.json`. Needed
+4. **Token** — `/healthz` is always open, so probe auth separately:
+   `curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $HATO_TOKEN" <url>/api/sessions`.
+   `401` means the hub requires a token and the local `HATO_TOKEN` is missing
+   or wrong; `200` with no `HATO_TOKEN` set means the hub is running open.
+5. **Allowlist** — read `/etc/claude-code/managed-settings.json`. Needed
    state: `channelsEnabled: true` and an `allowedChannelPlugins` entry
    `{"marketplace": "hato", "plugin": "hato"}`.
-5. **Alias** — detect the user's login shell (`$SHELL`). Look for existing
+6. **Alias** — detect the user's login shell (`$SHELL`). Look for existing
    hato wiring: fish → a `claude` function in `~/.config/fish/config.fish`
    or `conf.d/*.fish` mentioning `plugin:hato@hato`; bash/zsh → same grep in
    `~/.bashrc` / `~/.bashrc.d/` / `~/.zshrc`.
-6. **CLI** — `command -v hato`.
-7. **HATO_HUB persistence** — if the hub is remote, is `HATO_HUB` exported
-   in shell config (not just the current environment)?
+7. **CLI** — `command -v hato`.
+8. **HATO_HUB / HATO_TOKEN persistence** — if the hub is remote or requires
+   a token, are they exported in shell config (not just the current
+   environment)?
 
 Show a compact status list (✅/❌ per item), then dispatch:
 
@@ -52,6 +57,22 @@ isn't trying to move it)
   for the hostname if not obvious (Tailscale MagicDNS names like
   `http://<hub-host>:8790` work)
 
+**Q1b: Bind address?** (only when the hub runs on this machine — never
+default silently, the hub has at most token auth)
+- *Loopback (`127.0.0.1`)* — single-machine use, nothing else can connect
+- *Tailscale IP* — multi-machine over a Tailnet; get it with
+  `tailscale ip -4`. Recommended default, and the safe choice when the
+  machine has no firewall
+- *All interfaces (`0.0.0.0`)* — only when a firewall restricts the port
+  (e.g. ufw allowing only `tailscale0`); warn otherwise
+
+**Q1c: Require a shared token?** (ask whenever the bind is not loopback;
+recommend *yes*)
+- *Yes* — generate one (`openssl rand -hex 16`) or reuse the existing hub
+  token; every participating machine must export the same `HATO_TOKEN`
+- *No* — anyone who can reach the port can read the ledger and send
+  messages; acceptable on loopback, risky elsewhere
+
 **Q2: Shell alias?**
 - *`--hato` shorthand (recommended)* — `claude --hato` expands to
   `claude --channels plugin:hato@hato`; plain `claude` stays untouched
@@ -67,23 +88,36 @@ Claude's Bash tool run `hato list` / `hato send` from any shell)
 
 Prefer a git clone (`git clone git@github.com:severzemlya/hato.git`,
 location up to the user, `~/work/hato` is the convention) so the hub
-survives plugin updates; `bun install` is NOT needed for the hub. Then:
+survives plugin updates; `bun install` is NOT needed for the hub.
+
+Put the bind address and token in an env file the unit reads (mode 600 —
+the token is a credential):
+
+```bash
+# ~/.config/hato/env
+HATO_HOST=<bind address from Q1b>
+HATO_TOKEN=<token from Q1c, omit the line if running open>
+```
 
 ```ini
 # ~/.config/systemd/user/hato-hub.service
 [Unit]
 Description=hato hub
+After=network-online.target
 
 [Service]
+EnvironmentFile=%h/.config/hato/env
 ExecStart=<bun path> <clone>/hub/hub.ts
-Restart=on-failure
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=default.target
 ```
 
 `systemctl --user daemon-reload && systemctl --user enable --now hato-hub`,
-then verify `curl -sf http://127.0.0.1:8790/healthz`.
+then verify `curl -sf http://<bind address>:8790/healthz`. If the machine
+should serve the hub while logged out, also `loginctl enable-linger`.
 
 If the user declines a clone, fall back to the plugin cache with a version
 glob wrapper — warn that it needs the service restarted after plugin
@@ -92,15 +126,21 @@ updates:
 
 ### Hub: remote
 
-Persist `HATO_HUB` for login shells so the channel, hooks, and CLI all see it:
+Persist `HATO_HUB` (and `HATO_TOKEN` if the hub requires one) for login
+shells so the channel, hooks, and CLI all see them:
 
-- fish → `~/.config/fish/conf.d/hato.fish`: `set -gx HATO_HUB http://<host>:8790`
+- fish → `~/.config/fish/conf.d/hato.fish`:
+  `set -gx HATO_HUB http://<host>:8790` (+ `set -gx HATO_TOKEN <token>`)
 - bash → `~/.bashrc.d/hato.sh` (if sourced) or append to `~/.bashrc`:
-  `export HATO_HUB=http://<host>:8790`
+  `export HATO_HUB=http://<host>:8790` (+ `export HATO_TOKEN=<token>`)
 - zsh → `~/.zshrc`
 
-Verify with `curl -sf --max-time 3 <url>/healthz`. If unreachable, check
-Tailscale is up before blaming the config.
+Verify with `curl -sf --max-time 3 <url>/healthz`, then auth with
+`curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer <token>" <url>/api/sessions`
+(expect `200`). If unreachable, check Tailscale is up before blaming the
+config. The hub machine itself also counts as "remote" here for its own
+sessions when the hub binds to a non-loopback address — persist the same
+variables there too.
 
 ### Allowlist (required once per machine — sudo)
 
@@ -192,7 +232,11 @@ exec bun "$(ls -d ~/.claude/plugins/cache/hato/hato/*/ | sort -V | tail -1)cli/h
 
 - Aliases and env persist per shell config; the *current* shell won't have
   them until re-sourced — say so.
-- The hub is unauthenticated by design: loopback / Tailnet only. Never
-  suggest exposing the port beyond that.
+- The token is minimal shared-secret auth, not a substitute for network
+  isolation: keep the hub on loopback / a Tailnet. Never suggest exposing
+  the port beyond that.
+- Changing or adding the hub token requires updating `HATO_TOKEN` on every
+  participating machine and restarting the hub; running sessions reconnect
+  with the old value until relaunched.
 - Sessions launched without `--channels` still register in the ledger and
   can send, but do not receive injections. That's expected, not a bug.

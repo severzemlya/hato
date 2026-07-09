@@ -20,6 +20,10 @@ import { BROADCAST, DEFAULT_PORT, type ClientMsg, type ServerMsg, type SessionRo
 
 const HUB = (process.env.HATO_HUB || `http://127.0.0.1:${DEFAULT_PORT}`).replace(/\/$/, '')
 const HUB_WS = HUB.replace(/^http/, 'ws') + '/ws'
+// Optional shared token (must match the hub's HATO_TOKEN)
+const AUTH: Record<string, string> = process.env.HATO_TOKEN
+  ? { authorization: `Bearer ${process.env.HATO_TOKEN}` }
+  : {}
 
 const SESSION_ID = randomUUID()
 // Let the hub pick a name on first registration (HATO_NAME requests one);
@@ -31,7 +35,7 @@ const log = (msg: string) => process.stderr.write(`hato channel: ${msg}\n`)
 // ---------- MCP server ----------
 
 const mcp = new Server(
-  { name: 'hato', version: '0.4.1' },
+  { name: 'hato', version: '0.5.0' },
   {
     capabilities: {
       tools: {},
@@ -114,7 +118,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     case 'hato_send': {
       const res = await fetch(`${HUB}/api/send`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...AUTH },
         body: JSON.stringify({ to: args.to, from: assignedName ?? 'unregistered', content: args.text }),
       })
       const body = (await res.json()) as { result?: string; delivered?: number; error?: string }
@@ -123,7 +127,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       return text(body.result === 'delivered' ? 'delivered (recipient is online)' : 'queued (recipient is offline — will be delivered when it comes back)')
     }
     case 'hato_list': {
-      const res = await fetch(`${HUB}/api/sessions`)
+      const res = await fetch(`${HUB}/api/sessions`, { headers: AUTH })
       const { sessions } = (await res.json()) as { sessions: SessionRow[] }
       if (sessions.length === 0) return text('no sessions registered')
       return text(sessions.map(fmtSession).join('\n'))
@@ -135,7 +139,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     case 'hato_rename': {
       const res = await fetch(`${HUB}/api/rename`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...AUTH },
         body: JSON.stringify({ from: assignedName, to: args.name }),
       })
       const body = (await res.json()) as { result?: string; name?: string; error?: string }
@@ -158,7 +162,8 @@ function wsSend(msg: ClientMsg) {
 }
 
 function connectHub() {
-  ws = new WebSocket(HUB_WS)
+  // headers on the WS client is a Bun extension (we always run under bun)
+  ws = new WebSocket(HUB_WS, { headers: AUTH } as unknown as string[])
 
   ws.onopen = () => {
     backoffMs = 1000
