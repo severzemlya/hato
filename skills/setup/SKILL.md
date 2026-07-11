@@ -82,6 +82,9 @@ recommend *yes*)
 **Q3: Install the `hato` CLI to ~/.local/bin?** (yes/no — lets the user and
 Claude's Bash tool run `hato list` / `hato send` from any shell)
 
+**Q4: Show the hato name in the statusline?** (yes/no — displays `🕊 <name>`
+inside Claude Code; requires the CLI from Q3)
+
 ## Step 3 — Apply
 
 ### Hub: this machine
@@ -215,6 +218,22 @@ exec bun "$(ls -d ~/.claude/plugins/cache/hato/hato/*/ | sort -V | tail -1)cli/h
 ```
 
 `chmod +x ~/.local/bin/hato`. Warn if `~/.local/bin` is not on PATH.
+
+### Statusline
+
+`hato statusline` reads Claude Code's statusLine JSON on stdin and prints
+`🕊 <name>` (nothing when the hub is down or the session is unknown — it never
+breaks the line).
+
+- No existing `statusLine` in `~/.claude/settings.json` → set it directly:
+  `{"statusLine": {"type": "command", "command": "hato statusline"}}`
+- Existing statusline script → **edit it, don't replace it**: capture stdin
+  once, pass it both to the existing renderer and to `hato statusline`, and
+  append the result, e.g.
+  `HATO=$(echo "$INPUT" | hato statusline); echo "$LINE${HATO:+ | $HATO}"`
+- The name appears once the SessionStart hook has reported the session to the
+  hub — i.e. from the first prompt of a session launched with the plugin
+  enabled; sessions from before this feature show nothing until resumed.
 
 ## Step 4 — Verify and hand off
 

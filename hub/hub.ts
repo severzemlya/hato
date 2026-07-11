@@ -9,6 +9,8 @@
  *     GET  /api/log?session=&limit=              message history
  *     POST /api/rename    {from, to}             rename a session
  *     POST /api/activity  {host, claude_pid, state}  working/idle reports from hooks
+ *     POST /api/claim     {host, claude_pid, session_id}  SessionStart hook: bind the Claude Code
+ *                                             session id; a resumed session gets its old name back
  *     GET  /healthz
  * - Ledger and inbox persist in SQLite (~/.local/share/hato/hato.db)
  * - Auth: optional shared token. Set HATO_TOKEN and every /api and /ws request
@@ -59,7 +61,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS messages_undelivered ON messages(to_name) WHERE delivered_at IS NULL;
 `)
 // Migrate older schemas (add columns if missing)
-for (const col of ['claude_pid INTEGER', 'activity TEXT', 'activity_at TEXT']) {
+for (const col of ['claude_pid INTEGER', 'activity TEXT', 'activity_at TEXT', 'claude_session_id TEXT']) {
   try {
     db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`)
   } catch {
@@ -125,6 +127,56 @@ function assignName(requested: string | undefined, selfId: string): string {
   }
 }
 
+// ---------- claims (Claude Code session id ↔ hato session) ----------
+
+// The SessionStart hook reports which Claude Code session id lives behind which
+// claude PID. The id survives `claude --resume`, so a resumed session can take
+// back the name its previous incarnation held. Claims may arrive before the
+// channel registers — keep them briefly and re-apply on register.
+const pendingClaims = new Map<string, { sessionId: string; at: number }>()
+const CLAIM_TTL_MS = 10 * 60_000
+const claimKey = (host: string, claudePid: number) => `${host}:${claudePid}`
+
+function pruneClaims() {
+  const cutoff = Date.now() - CLAIM_TTL_MS
+  for (const [k, v] of pendingClaims) if (v.at < cutoff) pendingClaims.delete(k)
+}
+
+/** Flush queued messages addressed to `name` down this session's socket */
+function flushQueued(sessionId: string, name: string) {
+  const ws = socketsBySessionId.get(sessionId)
+  if (!ws) return
+  const pending = db
+    .query<MessageRow, [string]>(
+      'SELECT * FROM messages WHERE to_name = ? AND delivered_at IS NULL ORDER BY id',
+    )
+    .all(name)
+  for (const m of pending) {
+    send(ws, { type: 'message', msgId: m.id, from: m.from_name, content: m.content, ts: m.created_at })
+  }
+}
+
+/** Stamp the Claude session id on a row; a resumed session inherits its predecessor's name */
+function applyClaim(session: SessionRow, claudeSessionId: string) {
+  if (session.claude_session_id !== claudeSessionId) {
+    db.query('UPDATE sessions SET claude_session_id = ? WHERE id = ?').run(claudeSessionId, session.id)
+  }
+  // Previous incarnation: same Claude session id, different row, no longer online
+  const prev = db
+    .query<SessionRow, [string, string]>(
+      'SELECT * FROM sessions WHERE claude_session_id = ? AND id != ? AND online = 0 ORDER BY last_seen DESC',
+    )
+    .get(claudeSessionId, session.id)
+  if (!prev) return
+  db.query('DELETE FROM sessions WHERE id = ?').run(prev.id)
+  db.query('UPDATE sessions SET name = ?, title = COALESCE(title, ?), status = COALESCE(status, ?), last_seen = ? WHERE id = ?')
+    .run(prev.name, prev.title, prev.status, now(), session.id)
+  const ws = socketsBySessionId.get(session.id)
+  if (ws) send(ws, { type: 'registered', id: session.id, name: prev.name }) // refresh the channel's cached name
+  console.log(`[hato] ~ ${session.name} → ${prev.name} (resumed Claude session)`)
+  flushQueued(session.id, prev.name)
+}
+
 // ---------- registration & delivery ----------
 
 function register(ws: Bun.ServerWebSocket<WsData>, msg: Extract<ClientMsg, { type: 'register' }>) {
@@ -144,13 +196,16 @@ function register(ws: Bun.ServerWebSocket<WsData>, msg: Extract<ClientMsg, { typ
   console.log(`[hato] + ${name} (${msg.host}:${msg.cwd})`)
 
   // Flush queued messages addressed to this name
-  const pending = db
-    .query<MessageRow, [string]>(
-      'SELECT * FROM messages WHERE to_name = ? AND delivered_at IS NULL ORDER BY id',
-    )
-    .all(name)
-  for (const m of pending) {
-    send(ws, { type: 'message', msgId: m.id, from: m.from_name, content: m.content, ts: m.created_at })
+  flushQueued(msg.id, name)
+
+  // A claim may have arrived before this registration (SessionStart hook races the channel)
+  if (msg.ppid != null) {
+    pruneClaims()
+    const claim = pendingClaims.get(claimKey(msg.host, msg.ppid))
+    if (claim) {
+      const row = db.query<SessionRow, [string]>('SELECT * FROM sessions WHERE id = ?').get(msg.id)
+      if (row) applyClaim(row, claim.sessionId)
+    }
   }
 }
 
@@ -268,6 +323,24 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     if (ws) send(ws, { type: 'registered', id: target.id, name: newName }) // refresh the channel's cached name
     console.log(`[hato] ~ ${body.from} → ${newName}`)
     return json({ result: 'renamed', name: newName })
+  }
+
+  if (url.pathname === '/api/claim' && req.method === 'POST') {
+    const body = (await req.json()) as { host?: string; claude_pid?: number; session_id?: string }
+    if (!body.host || !body.claude_pid || !body.session_id) {
+      return json({ error: 'host, claude_pid and session_id are required' }, 400)
+    }
+    pruneClaims()
+    pendingClaims.set(claimKey(body.host, body.claude_pid), { sessionId: body.session_id, at: Date.now() })
+    const session = db
+      .query<SessionRow, [string, number]>(
+        'SELECT * FROM sessions WHERE host = ? AND claude_pid = ? AND online = 1',
+      )
+      .get(body.host, body.claude_pid)
+    if (!session) return json({ result: 'pending' }) // applied when the channel registers
+    applyClaim(session, body.session_id)
+    const updated = db.query<SessionRow, [string]>('SELECT * FROM sessions WHERE id = ?').get(session.id)
+    return json({ result: 'claimed', name: updated?.name ?? session.name })
   }
 
   if (url.pathname === '/api/activity' && req.method === 'POST') {

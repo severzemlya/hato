@@ -7,6 +7,7 @@
  *   hato broadcast <text…>        broadcast to all online sessions
  *   hato log [name] [-n count]    message history
  *   hato rename <from> <to>       rename a session
+ *   hato statusline               print this session's hato name (for Claude Code statusLine)
  *   hato hub                      run the hub in the foreground (for systemd)
  *
  * The hub address comes from $HATO_HUB (default http://127.0.0.1:8790).
@@ -28,6 +29,7 @@ const USAGE = `usage:
   hato broadcast <text…>        broadcast to all online sessions
   hato log [name] [-n count]    message history (default 30)
   hato rename <from> <to>       rename a session
+  hato statusline               print this session's hato name (reads Claude Code statusLine JSON on stdin)
   hato hub                      run the hub (foreground)
 
 env: HATO_HUB=${HUB}`
@@ -120,6 +122,45 @@ switch (cmd) {
     if (body.error) fail(body.error)
     console.log(`renamed '${from}' → '${body.name}'`)
     break
+  }
+
+  // Claude Code statusLine integration: reads the statusLine JSON on stdin and
+  // prints this session's hato name (e.g. "🕊 suzume"). Prints nothing and
+  // exits 0 when the session is unknown or the hub is unreachable, so it can
+  // sit inside any statusline script without breaking it.
+  case 'statusline': {
+    try {
+      const input = JSON.parse(await Bun.stdin.text()) as { session_id?: string }
+      if (!input.session_id) process.exit(0)
+      const res = await fetch(`${HUB}/api/sessions`, { headers: AUTH, signal: AbortSignal.timeout(1500) })
+      const { sessions } = (await res.json()) as { sessions: SessionRow[] }
+      const me = sessions.find(s => s.claude_session_id === input.session_id && s.online)
+      if (me) console.log(`🕊 ${me.name}`)
+    } catch {
+      /* hub down or bad input — stay silent */
+    }
+    process.exit(0)
+  }
+
+  // Internal command for the SessionStart hook: bind the Claude Code session id
+  // (stdin JSON) to this claude PID so a resumed session gets its old name back.
+  // Always exits 0 so a hub outage never breaks the hooks.
+  case '_claim': {
+    const [flag, pid] = rest
+    if (flag !== '--claude-pid' || !pid) process.exit(0)
+    try {
+      const input = JSON.parse(await Bun.stdin.text()) as { session_id?: string }
+      if (!input.session_id) process.exit(0)
+      await fetch(`${HUB}/api/claim`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...AUTH },
+        body: JSON.stringify({ host: hostname(), claude_pid: Number(pid), session_id: input.session_id }),
+        signal: AbortSignal.timeout(2000),
+      })
+    } catch {
+      /* hub down — ignore */
+    }
+    process.exit(0)
   }
 
   // Internal command for hooks: report working/idle to the hub.

@@ -28,6 +28,7 @@ export interface SessionRow {
   cwd: string
   pid: number
   claude_pid: number | null
+  claude_session_id: string | null // Claude Code session id (stable across resume; reported by the SessionStart hook)
   title: string | null
   status: string | null
   activity: string | null // 'working' | 'idle' (reported by hooks)

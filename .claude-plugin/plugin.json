@@ -1,7 +1,7 @@
 {
   "name": "hato",
   "displayName": "hato 🕊",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Carrier-pigeon messaging between Claude Code sessions — send, broadcast, and get woken up by other sessions across your machines",
   "author": {
     "name": "severzemlya",

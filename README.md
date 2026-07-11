@@ -30,6 +30,8 @@ delivered
 - **Live ledger** — who's online, working ⚡ or idle 💤, on which host, doing what
 - **Multi-host** — one hub, many machines (designed for a Tailnet)
 - **Bird names** — sessions get unique random names (`suzume`, `kounotori`, …); rename anytime
+- **Names survive resume** — `claude --resume` / `--continue` gets the same hato name (and any queued messages) back
+- **Statusline integration** — `hato statusline` shows the session's name inside Claude Code
 
 ## How it works
 
@@ -106,9 +108,10 @@ This repo is its own plugin marketplace:
 ```
 
 The plugin ships the channel MCP server (pre-bundled, no `bun install` needed), the
-hooks that report working/idle state, and a **`/hato:setup`** skill — run it in any
-session and it walks you through the rest of this section interactively (hub location,
-allowlist, shell alias, CLI).
+hooks that report working/idle state and bind the Claude Code session id (so resumed
+sessions keep their name), and a **`/hato:setup`** skill — run it in any session and
+it walks you through the rest of this section interactively (hub location, allowlist,
+shell alias, CLI, statusline).
 
 ### 3. Allow the channel (once per machine)
 
@@ -160,6 +163,23 @@ hato send suzume "build done?"   # direct message (queued if offline)
 hato broadcast "deploy at 15:00" # every online session
 hato log [name] [-n 50]          # message history
 hato rename kounotori dev        # rename a session
+```
+
+### Show the session name in Claude Code (statusline)
+
+`hato statusline` reads Claude Code's statusLine JSON on stdin and prints the
+session's hato name (`🕊 suzume`), or nothing if the hub is unreachable. Use it
+alone or append it to an existing statusline script:
+
+```jsonc
+// ~/.claude/settings.json
+{ "statusLine": { "type": "command", "command": "hato statusline" } }
+```
+
+```bash
+# inside an existing statusline script
+HATO=$(echo "$INPUT" | hato statusline)
+echo "$LINE${HATO:+ | $HATO}"
 ```
 
 ### From inside a session

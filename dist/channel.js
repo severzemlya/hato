@@ -14080,7 +14080,7 @@ var SESSION_ID = randomUUID();
 var assignedName = process.env.HATO_NAME ?? null;
 var log = (msg) => process.stderr.write(`hato channel: ${msg}
 `);
-var mcp = new Server({ name: "hato", version: "0.5.0" }, {
+var mcp = new Server({ name: "hato", version: "0.6.0" }, {
   capabilities: {
     tools: {},
     experimental: { "claude/channel": {} }

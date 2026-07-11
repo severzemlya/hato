@@ -35,7 +35,7 @@ const log = (msg: string) => process.stderr.write(`hato channel: ${msg}\n`)
 // ---------- MCP server ----------
 
 const mcp = new Server(
-  { name: 'hato', version: '0.5.0' },
+  { name: 'hato', version: '0.6.0' },
   {
     capabilities: {
       tools: {},
