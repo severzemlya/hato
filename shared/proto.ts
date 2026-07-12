@@ -14,11 +14,13 @@ export type ClientMsg =
     }
   | { type: 'status'; title?: string; status?: string }
   | { type: 'ack'; msgId: number }
+  | { type: 'ping' } // heartbeat: detects a half-open connection (e.g. silent WiFi drop)
 
 /** hub → channel */
 export type ServerMsg =
   | { type: 'registered'; id: string; name: string } // name confirmation on register / rename
   | { type: 'message'; msgId: number; from: string; content: string; ts: string }
+  | { type: 'pong' } // heartbeat reply
   | { type: 'error'; error: string }
 
 export interface SessionRow {

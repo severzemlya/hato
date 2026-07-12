@@ -377,6 +377,10 @@ const server = Bun.serve<WsData, {}>({
     return new Response('not found', { status: 404 })
   },
   websocket: {
+    // A client that goes silent (WiFi drop) sends no pings; after this many
+    // seconds bun closes the socket and `close()` flips it offline. Healthy
+    // channels ping every 15s, well under this.
+    idleTimeout: 60,
     message(ws, raw) {
       let msg: ClientMsg
       try {
@@ -384,6 +388,7 @@ const server = Bun.serve<WsData, {}>({
       } catch {
         return send(ws, { type: 'error', error: 'invalid json' })
       }
+      if (msg.type === 'ping') return send(ws, { type: 'pong' })
       if (msg.type === 'register') return register(ws, msg)
 
       const session = sessionOf(ws)
@@ -398,11 +403,14 @@ const server = Bun.serve<WsData, {}>({
     },
     close(ws) {
       const session = sessionOf(ws)
-      if (session) {
-        socketsBySessionId.delete(session.id)
-        db.query('UPDATE sessions SET online = 0, last_seen = ? WHERE id = ?').run(now(), session.id)
-        console.log(`[hato] - ${session.name}`)
-      }
+      if (!session) return
+      // Only act if THIS socket is still the current one. A reconnect (same
+      // SESSION_ID) may have already replaced it in the map; a late close from
+      // the old, dead socket must not knock the freshly-reconnected session offline.
+      if (socketsBySessionId.get(session.id) !== ws) return
+      socketsBySessionId.delete(session.id)
+      db.query('UPDATE sessions SET online = 0, last_seen = ? WHERE id = ?').run(now(), session.id)
+      console.log(`[hato] - ${session.name}`)
     },
   },
 })

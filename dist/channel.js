@@ -14080,7 +14080,7 @@ var SESSION_ID = randomUUID();
 var assignedName = process.env.HATO_NAME ?? null;
 var log = (msg) => process.stderr.write(`hato channel: ${msg}
 `);
-var mcp = new Server({ name: "hato", version: "0.6.0" }, {
+var mcp = new Server({ name: "hato", version: "0.6.1" }, {
   capabilities: {
     tools: {},
     experimental: { "claude/channel": {} }
@@ -14197,14 +14197,49 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 });
 var ws = null;
 var backoffMs = 1000;
+var heartbeatTimer = null;
+var connectTimer = null;
+var awaitingPong = false;
+var HEARTBEAT_MS = 15000;
+var CONNECT_TIMEOUT_MS = 1e4;
 function wsSend(msg) {
   if (ws && ws.readyState === WebSocket.OPEN)
     ws.send(JSON.stringify(msg));
 }
+function clearTimers() {
+  if (heartbeatTimer)
+    clearInterval(heartbeatTimer);
+  if (connectTimer)
+    clearTimeout(connectTimer);
+  heartbeatTimer = connectTimer = null;
+}
+function reconnect(reason, delay) {
+  clearTimers();
+  const dead = ws;
+  ws = null;
+  if (dead) {
+    dead.onopen = dead.onmessage = dead.onclose = dead.onerror = null;
+    try {
+      dead.close();
+    } catch {}
+  }
+  log(`${reason} \u2014 reconnecting in ${Math.round(delay / 1000)}s`);
+  backoffMs = Math.min(backoffMs * 2, 30000);
+  setTimeout(connectHub, delay);
+}
 function connectHub() {
   ws = new WebSocket(HUB_WS, { headers: AUTH });
-  ws.onopen = () => {
+  const self = ws;
+  connectTimer = setTimeout(() => {
+    if (ws === self && self.readyState !== WebSocket.OPEN)
+      reconnect("connect timed out", backoffMs);
+  }, CONNECT_TIMEOUT_MS);
+  self.onopen = () => {
+    if (connectTimer)
+      clearTimeout(connectTimer);
+    connectTimer = null;
     backoffMs = 1000;
+    awaitingPong = false;
     wsSend({
       type: "register",
       id: SESSION_ID,
@@ -14214,15 +14249,28 @@ function connectHub() {
       pid: process.pid,
       ppid: process.ppid
     });
+    if (heartbeatTimer)
+      clearInterval(heartbeatTimer);
+    heartbeatTimer = setInterval(() => {
+      if (!ws || ws.readyState !== WebSocket.OPEN)
+        return;
+      if (awaitingPong)
+        return reconnect("hub stopped responding (heartbeat timeout)", 0);
+      awaitingPong = true;
+      wsSend({ type: "ping" });
+    }, HEARTBEAT_MS);
   };
-  ws.onmessage = (ev) => {
+  self.onmessage = (ev) => {
+    awaitingPong = false;
     let msg;
     try {
       msg = JSON.parse(String(ev.data));
     } catch {
       return;
     }
-    if (msg.type === "registered") {
+    if (msg.type === "pong") {
+      return;
+    } else if (msg.type === "registered") {
       assignedName = msg.name;
       log(`registered as '${msg.name}' (hub: ${HUB})`);
     } else if (msg.type === "message") {
@@ -14243,12 +14291,12 @@ function connectHub() {
       log(`hub error: ${msg.error}`);
     }
   };
-  ws.onclose = () => {
-    ws = null;
-    setTimeout(connectHub, backoffMs);
-    backoffMs = Math.min(backoffMs * 2, 30000);
+  self.onclose = () => {
+    if (ws !== self)
+      return;
+    reconnect("connection closed", backoffMs);
   };
-  ws.onerror = () => {};
+  self.onerror = () => {};
 }
 mcp.onclose = () => process.exit(0);
 await mcp.connect(new StdioServerTransport);

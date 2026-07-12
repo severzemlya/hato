@@ -35,7 +35,7 @@ const log = (msg: string) => process.stderr.write(`hato channel: ${msg}\n`)
 // ---------- MCP server ----------
 
 const mcp = new Server(
-  { name: 'hato', version: '0.6.0' },
+  { name: 'hato', version: '0.6.1' },
   {
     capabilities: {
       tools: {},
@@ -156,17 +156,66 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
 let ws: WebSocket | null = null
 let backoffMs = 1000
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+let connectTimer: ReturnType<typeof setTimeout> | null = null
+let awaitingPong = false
+
+// A silent network drop (WiFi off) kills TCP without a close frame. Two things
+// then need watchdogs, because neither fires `onclose` promptly on its own:
+//  - an established socket goes quiet → HEARTBEAT_MS ping / missed-pong detection
+//  - a *reconnect* SYN gets black-holed and stalls in CONNECTING → CONNECT_TIMEOUT_MS
+// Without the connect watchdog, the socket opened mid-outage sits in CONNECTING
+// through TCP's long SYN backoff, so recovery lags far behind the network coming back.
+const HEARTBEAT_MS = 15_000
+const CONNECT_TIMEOUT_MS = 10_000
 
 function wsSend(msg: ClientMsg) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
 }
 
+function clearTimers() {
+  if (heartbeatTimer) clearInterval(heartbeatTimer)
+  if (connectTimer) clearTimeout(connectTimer)
+  heartbeatTimer = connectTimer = null
+}
+
+// Drop the current socket and schedule a fresh connection after `delay`. Handlers
+// are detached first so the socket's own (possibly much-delayed) close event can't
+// schedule a second, competing reconnect. Backoff grows per attempt (reset on a
+// successful open), so a fresh SYN keeps going out until the network is back.
+function reconnect(reason: string, delay: number) {
+  clearTimers()
+  const dead = ws
+  ws = null
+  if (dead) {
+    dead.onopen = dead.onmessage = dead.onclose = dead.onerror = null
+    try {
+      dead.close()
+    } catch {
+      /* already dead */
+    }
+  }
+  log(`${reason} — reconnecting in ${Math.round(delay / 1000)}s`)
+  backoffMs = Math.min(backoffMs * 2, 30_000)
+  setTimeout(connectHub, delay)
+}
+
 function connectHub() {
   // headers on the WS client is a Bun extension (we always run under bun)
   ws = new WebSocket(HUB_WS, { headers: AUTH } as unknown as string[])
+  const self = ws
 
-  ws.onopen = () => {
+  // Give up on a connect that never opens (black-holed SYN) and retry with a
+  // fresh socket, so recovery isn't hostage to TCP's SYN-retransmit backoff.
+  connectTimer = setTimeout(() => {
+    if (ws === self && self.readyState !== WebSocket.OPEN) reconnect('connect timed out', backoffMs)
+  }, CONNECT_TIMEOUT_MS)
+
+  self.onopen = () => {
+    if (connectTimer) clearTimeout(connectTimer)
+    connectTimer = null
     backoffMs = 1000
+    awaitingPong = false
     wsSend({
       type: 'register',
       id: SESSION_ID,
@@ -176,16 +225,26 @@ function connectHub() {
       pid: process.pid,
       ppid: process.ppid,
     })
+    if (heartbeatTimer) clearInterval(heartbeatTimer)
+    heartbeatTimer = setInterval(() => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return
+      if (awaitingPong) return reconnect('hub stopped responding (heartbeat timeout)', 0)
+      awaitingPong = true
+      wsSend({ type: 'ping' })
+    }, HEARTBEAT_MS)
   }
 
-  ws.onmessage = ev => {
+  self.onmessage = ev => {
+    awaitingPong = false // any inbound traffic proves the link is alive
     let msg: ServerMsg
     try {
       msg = JSON.parse(String(ev.data))
     } catch {
       return
     }
-    if (msg.type === 'registered') {
+    if (msg.type === 'pong') {
+      return
+    } else if (msg.type === 'registered') {
       assignedName = msg.name
       log(`registered as '${msg.name}' (hub: ${HUB})`)
     } else if (msg.type === 'message') {
@@ -209,12 +268,11 @@ function connectHub() {
     }
   }
 
-  ws.onclose = () => {
-    ws = null
-    setTimeout(connectHub, backoffMs)
-    backoffMs = Math.min(backoffMs * 2, 30_000)
+  self.onclose = () => {
+    if (ws !== self) return // already superseded by a reconnect
+    reconnect('connection closed', backoffMs)
   }
-  ws.onerror = () => {
+  self.onerror = () => {
     // onclose fires right after; reconnection is handled there
   }
 }
