@@ -16,7 +16,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { randomUUID } from 'crypto'
 import { hostname } from 'os'
-import { BROADCAST, DEFAULT_PORT, type ClientMsg, type ServerMsg, type SessionRow } from '../shared/proto.ts'
+import { BROADCAST, DEFAULT_PORT, type ClientMsg, type PostRow, type ServerMsg, type SessionRow } from '../shared/proto.ts'
 
 const HUB = (process.env.HATO_HUB || `http://127.0.0.1:${DEFAULT_PORT}`).replace(/\/$/, '')
 const HUB_WS = HUB.replace(/^http/, 'ws') + '/ws'
@@ -35,7 +35,7 @@ const log = (msg: string) => process.stderr.write(`hato channel: ${msg}\n`)
 // ---------- MCP server ----------
 
 const mcp = new Server(
-  { name: 'hato', version: '0.6.1' },
+  { name: 'hato', version: '0.7.0' },
   {
     capabilities: {
       tools: {},
@@ -46,7 +46,10 @@ const mcp = new Server(
       '',
       'Messages from other sessions arrive as <channel source="hato" chat_id="<sender>" ...>.',
       'Reply with the hato_send tool, passing the chat_id (the sender session name) as `to`. Use to="*" to broadcast.',
-      'hato_list shows current sessions (name, host, cwd, working/idle, status).',
+      'hato_list shows current sessions (name, host, cwd, working/idle, status) and posts (📮).',
+      'A post is a mailbox with no session behind it — agents that cannot receive channel injections',
+      '(Codex, scripts) poll it with the `hato post check/watch` CLI. Sending to a post name just',
+      'queues the message for pickup. Create one with `hato post new <name>` (Bash).',
       'When starting long work, update your title/status with hato_status so other sessions can see it.',
       'The hub assigns each session a random bird name; change it with hato_rename.',
       '',
@@ -62,7 +65,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'hato_send',
       description:
-        'Send a message to another Claude Code session. `to` is a session name (see hato_list or the chat_id of a received message), or "*" to broadcast to all online sessions. Direct messages to an offline session are queued and delivered when it comes back online.',
+        'Send a message to another Claude Code session or a post (📮 mailbox polled by non-Claude agents). `to` is a session/post name (see hato_list or the chat_id of a received message), or "*" to broadcast to all online sessions and posts. Direct messages to an offline session are queued and delivered when it comes back online.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -74,7 +77,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'hato_list',
-      description: 'List Claude Code sessions registered with hato (name, host, cwd, working/idle, status, online state).',
+      description: 'List Claude Code sessions registered with hato (name, host, cwd, working/idle, status, online state) and posts (📮 mailboxes with their waiting-message counts).',
       inputSchema: { type: 'object', properties: {} },
     },
     {
@@ -121,16 +124,28 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         headers: { 'content-type': 'application/json', ...AUTH },
         body: JSON.stringify({ to: args.to, from: assignedName ?? 'unregistered', content: args.text }),
       })
-      const body = (await res.json()) as { result?: string; delivered?: number; error?: string }
+      const body = (await res.json()) as { result?: string; delivered?: number; posted?: number; error?: string }
       if (body.error) return text(`send failed: ${body.error}`)
-      if (body.result === 'broadcast') return text(`broadcast sent (delivered to ${body.delivered} sessions)`)
+      if (body.result === 'broadcast') {
+        return text(`broadcast sent (delivered to ${body.delivered} sessions${body.posted ? `, ${body.posted} posts` : ''})`)
+      }
+      if (body.result === 'posted') return text('posted (a 📮 mailbox — waiting to be picked up by its consumer)')
       return text(body.result === 'delivered' ? 'delivered (recipient is online)' : 'queued (recipient is offline — will be delivered when it comes back)')
     }
     case 'hato_list': {
-      const res = await fetch(`${HUB}/api/sessions`, { headers: AUTH })
-      const { sessions } = (await res.json()) as { sessions: SessionRow[] }
-      if (sessions.length === 0) return text('no sessions registered')
-      return text(sessions.map(fmtSession).join('\n'))
+      const [sres, pres] = await Promise.all([
+        fetch(`${HUB}/api/sessions`, { headers: AUTH }),
+        fetch(`${HUB}/api/posts`, { headers: AUTH }),
+      ])
+      const { sessions } = (await sres.json()) as { sessions: SessionRow[] }
+      const { posts } = (await pres.json()) as { posts: PostRow[] }
+      if (sessions.length === 0 && posts.length === 0) return text('no sessions registered')
+      const lines = [
+        ...sessions.map(fmtSession),
+        ...posts.map(p =>
+          `📮 ${p.name}  ${p.waiting} waiting${p.watching ? ' — being watched' : ''}${p.note ? `  [${p.note}]` : ''}`),
+      ]
+      return text(lines.join('\n'))
     }
     case 'hato_status': {
       wsSend({ type: 'status', title: args.title, status: args.status })

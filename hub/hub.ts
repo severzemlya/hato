@@ -8,6 +8,11 @@
  *     POST /api/send      {to, from?, content}   send; to='*' broadcasts to all online
  *     GET  /api/log?session=&limit=              message history
  *     POST /api/rename    {from, to}             rename a session
+ *     GET  /api/posts                            list posts (mailboxes)
+ *     POST /api/post/new  {name?, note?}         create a post; name is random when omitted
+ *     POST /api/post/rm   {name}                 remove a post (drops its undelivered messages)
+ *     POST /api/post/check {name, peek?, wait?}  fetch waiting messages and mark them delivered
+ *                                             (peek: don't mark; wait: long-poll up to N seconds)
  *     POST /api/activity  {host, claude_pid, state}  working/idle reports from hooks
  *     POST /api/claim     {host, claude_pid, session_id}  SessionStart hook: bind the Claude Code
  *                                             session id; a resumed session gets its old name back
@@ -59,6 +64,12 @@ db.exec(`
     delivered_at TEXT
   );
   CREATE INDEX IF NOT EXISTS messages_undelivered ON messages(to_name) WHERE delivered_at IS NULL;
+  CREATE TABLE IF NOT EXISTS posts (
+    name TEXT PRIMARY KEY,
+    note TEXT,
+    created_at TEXT NOT NULL,
+    checked_at TEXT
+  );
 `)
 // Migrate older schemas (add columns if missing)
 for (const col of ['claude_pid INTEGER', 'activity TEXT', 'activity_at TEXT', 'claude_session_id TEXT']) {
@@ -82,6 +93,41 @@ function send(ws: Bun.ServerWebSocket<WsData>, msg: ServerMsg) {
   ws.send(JSON.stringify(msg))
 }
 
+// ---------- posts (polling mailboxes) ----------
+
+// A post is a named mailbox with no session behind it. Messages sent to it queue
+// until a consumer — typically an agent that can't receive channel injections
+// (Codex, plain scripts) — picks them up via /api/post/check, polling or long-polling.
+
+type PostDbRow = { name: string; note: string | null; created_at: string; checked_at: string | null }
+
+const postByName = (name: string) =>
+  db.query<PostDbRow, [string]>('SELECT * FROM posts WHERE name = ?').get(name)
+
+// Long-poll watchers per post name; called (synchronously) whenever a message lands
+const postWatchers = new Map<string, Set<() => void>>()
+
+function notifyPostWatchers(name: string) {
+  const set = postWatchers.get(name)
+  if (!set) return
+  for (const wake of [...set]) wake()
+}
+
+function waitForPostMessage(name: string, ms: number): Promise<void> {
+  return new Promise(resolve => {
+    let set = postWatchers.get(name)
+    if (!set) postWatchers.set(name, (set = new Set()))
+    const timer = setTimeout(done, ms)
+    function done() {
+      clearTimeout(timer)
+      set!.delete(done)
+      if (set!.size === 0) postWatchers.delete(name)
+      resolve()
+    }
+    set.add(done)
+  })
+}
+
 // ---------- naming ----------
 
 // Bird name pool (Japanese). When exhausted, -2, -3, … suffixes are added.
@@ -97,6 +143,7 @@ const sanitizeName = (s: string) =>
   s.replace(/[^\p{L}\p{N}_.-]/gu, '-').replace(/^-+|-+$/g, '').slice(0, 48)
 
 function nameTaken(name: string, selfId?: string): boolean {
+  if (postByName(name)) return true // posts share the namespace and never yield
   const holder = db.query<SessionRow, [string]>('SELECT * FROM sessions WHERE name = ?').get(name)
   return !!holder && holder.id !== selfId
 }
@@ -115,13 +162,15 @@ function assignName(requested: string | undefined, selfId: string): string {
   const base = sanitizeName(requested) || 'session'
   let name = base
   for (let n = 2; ; n++) {
-    const holder = db.query<SessionRow, [string]>('SELECT * FROM sessions WHERE name = ?').get(name)
-    if (!holder || holder.id === selfId) return name
-    if (!holder.online) {
-      // An offline session yields its name to the newcomer
-      // (queued messages are addressed by name, so the newcomer inherits them)
-      db.query('DELETE FROM sessions WHERE id = ?').run(holder.id)
-      return name
+    if (!postByName(name)) {
+      const holder = db.query<SessionRow, [string]>('SELECT * FROM sessions WHERE name = ?').get(name)
+      if (!holder || holder.id === selfId) return name
+      if (!holder.online) {
+        // An offline session yields its name to the newcomer
+        // (queued messages are addressed by name, so the newcomer inherits them)
+        db.query('DELETE FROM sessions WHERE id = ?').run(holder.id)
+        return name
+      }
     }
     name = `${base}-${n}`
   }
@@ -228,27 +277,40 @@ function saveMessage(toName: string, fromName: string, content: string): number 
   return Number(res.lastInsertRowid)
 }
 
-/** Direct message: persist, then deliver immediately if the target is online */
-function routeMessage(toName: string, fromName: string, content: string): 'delivered' | 'queued' | 'unknown' {
+/** Direct message: persist, then deliver immediately if the target is online.
+ *  A post target just keeps the message waiting ('posted') and wakes its long-pollers. */
+function routeMessage(toName: string, fromName: string, content: string): 'delivered' | 'queued' | 'posted' | 'unknown' {
   const target = db.query<SessionRow, [string]>('SELECT * FROM sessions WHERE name = ?').get(toName)
+  const isPost = !target && !!postByName(toName)
   const msgId = saveMessage(toName, fromName, content)
   if (target && pushTo(target, msgId, fromName, content)) return 'delivered'
-  return target ? 'queued' : 'unknown'
+  if (target) return 'queued'
+  if (isPost) {
+    notifyPostWatchers(toName)
+    return 'posted'
+  }
+  return 'unknown'
 }
 
-/** Broadcast: every online session except the sender (no queueing for offline ones) */
-function broadcast(fromName: string, content: string): number {
+/** Broadcast: every online session except the sender (no queueing for offline ones), plus every post */
+function broadcast(fromName: string, content: string): { delivered: number; posted: number } {
   const online = db.query<SessionRow, []>('SELECT * FROM sessions WHERE online = 1').all()
-  let count = 0
+  let delivered = 0
   for (const s of online) {
     if (s.name === fromName) continue
     const msgId = saveMessage(s.name, fromName, content)
     if (pushTo(s, msgId, fromName, content)) {
       db.query('UPDATE messages SET delivered_at = ? WHERE id = ?').run(now(), msgId) // count as delivered without waiting for ack, so TTL applies
-      count++
+      delivered++
     }
   }
-  return count
+  let posted = 0
+  for (const p of db.query<{ name: string }, []>('SELECT name FROM posts').all()) {
+    saveMessage(p.name, fromName, content)
+    notifyPostWatchers(p.name)
+    posted++
+  }
+  return { delivered, posted }
 }
 
 // ---------- TTL sweep ----------
@@ -284,7 +346,7 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     if (!body.to || !body.content) return json({ error: 'to and content are required' }, 400)
     const from = body.from ?? 'cli'
     if (body.to === BROADCAST) {
-      return json({ result: 'broadcast', delivered: broadcast(from, body.content) })
+      return json({ result: 'broadcast', ...broadcast(from, body.content) })
     }
     const result = routeMessage(body.to, from, body.content)
     if (result === 'unknown') {
@@ -343,6 +405,77 @@ async function handleApi(req: Request, url: URL): Promise<Response> {
     return json({ result: 'claimed', name: updated?.name ?? session.name })
   }
 
+  if (url.pathname === '/api/posts' && req.method === 'GET') {
+    const rows = db
+      .query<PostDbRow & { waiting: number }, []>(
+        `SELECT p.*, (SELECT COUNT(*) FROM messages m WHERE m.to_name = p.name AND m.delivered_at IS NULL) AS waiting
+         FROM posts p ORDER BY p.name`,
+      )
+      .all()
+    return json({ posts: rows.map(p => ({ ...p, watching: postWatchers.get(p.name)?.size ?? 0 })) })
+  }
+
+  if (url.pathname === '/api/post/new' && req.method === 'POST') {
+    const body = (await req.json()) as { name?: string; note?: string }
+    let name: string
+    if (body.name) {
+      name = sanitizeName(body.name)
+      if (!name || name === BROADCAST) return json({ error: `'${body.name}' is not a valid name` }, 400)
+      if (postByName(name)) return json({ error: `post '${name}' already exists` }, 409)
+      const holder = db.query<SessionRow, [string]>('SELECT * FROM sessions WHERE name = ?').get(name)
+      if (holder?.online) return json({ error: `'${name}' is taken by an online session` }, 409)
+      // An offline session yields its name (its queued messages flow to the post)
+      if (holder) db.query('DELETE FROM sessions WHERE id = ?').run(holder.id)
+    } else {
+      name = randomFreeName('')
+    }
+    db.query('INSERT INTO posts (name, note, created_at) VALUES (?, ?, ?)').run(name, body.note ?? null, now())
+    console.log(`[hato] + post ${name}`)
+    return json({ result: 'created', name })
+  }
+
+  if (url.pathname === '/api/post/rm' && req.method === 'POST') {
+    const body = (await req.json()) as { name?: string }
+    if (!body.name) return json({ error: 'name is required' }, 400)
+    if (!postByName(body.name)) return json({ error: `no post named '${body.name}'` }, 404)
+    db.query('DELETE FROM posts WHERE name = ?').run(body.name)
+    // Drop what's still waiting — otherwise a session registering under this
+    // name later would have it flushed as if it were addressed to them
+    const dropped = db.query('DELETE FROM messages WHERE to_name = ? AND delivered_at IS NULL').run(body.name)
+    notifyPostWatchers(body.name) // long-pollers wake up and see the 404 on their next check
+    console.log(`[hato] - post ${body.name}`)
+    return json({ result: 'removed', dropped: dropped.changes })
+  }
+
+  if (url.pathname === '/api/post/check' && req.method === 'POST') {
+    const body = (await req.json()) as { name?: string; peek?: boolean; wait?: number }
+    if (!body.name) return json({ error: 'name is required' }, 400)
+    if (!postByName(body.name)) return json({ error: `no post named '${body.name}'` }, 404)
+    const name = body.name
+    const undelivered = () =>
+      db
+        .query<MessageRow, [string]>('SELECT * FROM messages WHERE to_name = ? AND delivered_at IS NULL ORDER BY id')
+        .all(name)
+    let msgs = undelivered()
+    // Long-poll: nothing waiting yet — park until a message lands or the wait expires.
+    // No fetch/register race: everything between undelivered() and the await is synchronous.
+    const waitMs = Math.min(Math.max(Number(body.wait ?? 0) || 0, 0), 120) * 1000
+    if (msgs.length === 0 && waitMs > 0) {
+      await waitForPostMessage(name, waitMs)
+      if (!postByName(name)) return json({ error: `no post named '${name}'` }, 404) // removed while we waited
+      msgs = undelivered()
+    }
+    // A watcher that died while parked must not consume: its response goes nowhere,
+    // so marking delivered here would silently eat the message
+    if (req.signal.aborted) return json({ messages: [] })
+    db.query('UPDATE posts SET checked_at = ? WHERE name = ?').run(now(), name)
+    if (!body.peek) {
+      const t = now()
+      for (const m of msgs) db.query('UPDATE messages SET delivered_at = ? WHERE id = ?').run(t, m.id)
+    }
+    return json({ messages: msgs })
+  }
+
   if (url.pathname === '/api/activity' && req.method === 'POST') {
     const body = (await req.json()) as { host?: string; claude_pid?: number; state?: string }
     if (!body.host || !body.claude_pid || !['working', 'idle'].includes(body.state ?? '')) {
@@ -372,6 +505,8 @@ const server = Bun.serve<WsData, {}>({
         : new Response('upgrade failed', { status: 400 })
     }
     if (url.pathname.startsWith('/api/')) {
+      // /api/post/check may long-poll — lift Bun's per-request idle timeout above the wait cap
+      if (url.pathname === '/api/post/check') srv.timeout(req, 150)
       return handleApi(req, url).catch(err => json({ error: String(err) }, 500))
     }
     return new Response('not found', { status: 404 })

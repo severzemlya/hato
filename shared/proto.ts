@@ -40,6 +40,16 @@ export interface SessionRow {
   last_seen: string
 }
 
+/** A post: a named mailbox with no session behind it — consumers poll it (see hub /api/post/*) */
+export interface PostRow {
+  name: string
+  note: string | null
+  created_at: string
+  checked_at: string | null // last time a consumer checked (poll liveness)
+  waiting: number // undelivered message count (computed by the API)
+  watching: number // long-poll watchers connected right now (computed by the API)
+}
+
 export interface MessageRow {
   id: number
   to_name: string

@@ -2,11 +2,12 @@
 /**
  * hato CLI: shared entry point for humans, scripts, and Claude (via Bash).
  *
- *   hato list                     list sessions
+ *   hato list                     list sessions and posts
  *   hato send <to> <text…>        send a message ('*' broadcasts)
- *   hato broadcast <text…>        broadcast to all online sessions
+ *   hato broadcast <text…>        broadcast to all online sessions and posts
  *   hato log [name] [-n count]    message history
  *   hato rename <from> <to>       rename a session
+ *   hato post new|ls|check|watch|rm   posts: polling mailboxes for agents outside Claude Code
  *   hato statusline               print this session's hato name (for Claude Code statusLine)
  *   hato hub                      run the hub in the foreground (for systemd)
  *
@@ -16,7 +17,7 @@
  */
 
 import { hostname } from 'os'
-import { BROADCAST, DEFAULT_PORT, type MessageRow, type SessionRow } from '../shared/proto.ts'
+import { BROADCAST, DEFAULT_PORT, type MessageRow, type PostRow, type SessionRow } from '../shared/proto.ts'
 
 const HUB = (process.env.HATO_HUB || `http://127.0.0.1:${DEFAULT_PORT}`).replace(/\/$/, '')
 const AUTH: Record<string, string> = process.env.HATO_TOKEN
@@ -24,11 +25,18 @@ const AUTH: Record<string, string> = process.env.HATO_TOKEN
   : {}
 
 const USAGE = `usage:
-  hato list                     list sessions
+  hato list                     list sessions and posts
   hato send <to> <text…>        send a message ('*' broadcasts)
-  hato broadcast <text…>        broadcast to all online sessions
+  hato broadcast <text…>        broadcast to all online sessions and posts
   hato log [name] [-n count]    message history (default 30)
   hato rename <from> <to>       rename a session
+
+  hato post new [name] [-m note]            create a post (random name when omitted)
+  hato post ls                              list posts
+  hato post check <name> [--peek] [--json]  read waiting messages (and mark them read; --peek keeps them)
+  hato post watch <name> [--json]           follow a post — print messages as they arrive (Ctrl-C to stop)
+  hato post rm <name>                       remove a post
+
   hato statusline               print this session's hato name (reads Claude Code statusLine JSON on stdin)
   hato hub                      run the hub (foreground)
 
@@ -55,19 +63,30 @@ const post = (path: string, body: unknown) =>
 
 async function doSend(to: string, content: string) {
   const res = await post('/api/send', { to, from: `${process.env.USER ?? 'cli'}@${hostname()}`, content })
-  const body = (await res.json()) as { result?: string; delivered?: number; error?: string }
+  const body = (await res.json()) as { result?: string; delivered?: number; posted?: number; error?: string }
   if (body.error) fail(body.error)
-  if (body.result === 'broadcast') console.log(`broadcast sent (delivered to ${body.delivered} sessions)`)
+  if (body.result === 'broadcast') {
+    console.log(`broadcast sent (delivered to ${body.delivered} sessions${body.posted ? `, ${body.posted} posts` : ''})`)
+  } else if (body.result === 'posted') console.log('posted (waiting to be picked up)')
   else console.log(body.result === 'delivered' ? 'delivered' : 'queued (recipient offline)')
+}
+
+const fmtPost = (p: PostRow) =>
+  `📮 ${p.name.padEnd(16)} ${p.waiting} waiting${p.watching ? ' 👀' : ''}${p.note ? `  [${p.note}]` : ''}`
+
+function printPostMessage(m: MessageRow, asJson: boolean) {
+  if (asJson) console.log(JSON.stringify({ id: m.id, from: m.from_name, content: m.content, ts: m.created_at }))
+  else console.log(`${m.created_at.slice(5, 16).replace('T', ' ')}  ${m.from_name}: ${m.content}`)
 }
 
 const [cmd, ...rest] = process.argv.slice(2)
 
 switch (cmd) {
   case 'list': {
-    const res = await api('/api/sessions')
-    const { sessions } = (await res.json()) as { sessions: SessionRow[] }
-    if (sessions.length === 0) {
+    const [sres, pres] = await Promise.all([api('/api/sessions'), api('/api/posts')])
+    const { sessions } = (await sres.json()) as { sessions: SessionRow[] }
+    const { posts } = (await pres.json()) as { posts: PostRow[] }
+    if (sessions.length === 0 && posts.length === 0) {
       console.log('no sessions registered')
       break
     }
@@ -77,6 +96,7 @@ switch (cmd) {
       const extra = [s.title, s.status].filter(Boolean).join(' — ')
       console.log(`${mark}${act} ${s.name.padEnd(16)} ${s.host}:${s.cwd}${extra ? `  [${extra}]` : ''}`)
     }
+    for (const p of posts) console.log(fmtPost(p))
     break
   }
 
@@ -121,6 +141,90 @@ switch (cmd) {
     const body = (await res.json()) as { name?: string; error?: string }
     if (body.error) fail(body.error)
     console.log(`renamed '${from}' → '${body.name}'`)
+    break
+  }
+
+  // Posts: polling mailboxes for agents that can't receive channel injections
+  // (Codex, plain scripts, cron jobs). `watch` long-polls the hub in a loop.
+  case 'post': {
+    const [sub, ...pargs] = rest
+    const flags = pargs.filter(a => a.startsWith('--'))
+    const words = pargs.filter(a => !a.startsWith('--'))
+    const asJson = flags.includes('--json')
+
+    switch (sub) {
+      case 'new': {
+        const noteIdx = pargs.indexOf('-m')
+        const note = noteIdx >= 0 ? pargs[noteIdx + 1] : undefined
+        const name = pargs.filter((_, i) => noteIdx < 0 || (i !== noteIdx && i !== noteIdx + 1))[0]
+        const res = await post('/api/post/new', { name, note })
+        const body = (await res.json()) as { name?: string; error?: string }
+        if (body.error) fail(body.error)
+        console.log(`created post '${body.name}' — send with 'hato send ${body.name} …', receive with 'hato post watch ${body.name}'`)
+        break
+      }
+
+      case 'ls': {
+        const res = await api('/api/posts')
+        const { posts } = (await res.json()) as { posts: PostRow[] }
+        if (posts.length === 0) {
+          console.log('no posts')
+          break
+        }
+        for (const p of posts) console.log(fmtPost(p))
+        break
+      }
+
+      case 'check': {
+        const name = words[0]
+        if (!name) fail(USAGE)
+        const res = await post('/api/post/check', { name, peek: flags.includes('--peek') })
+        const body = (await res.json()) as { messages?: MessageRow[]; error?: string }
+        if (body.error) fail(body.error)
+        if (body.messages!.length === 0 && !asJson) console.log('no new messages')
+        for (const m of body.messages!) printPostMessage(m, asJson)
+        break
+      }
+
+      case 'watch': {
+        const name = words[0]
+        if (!name) fail(USAGE)
+        if (!asJson) console.error(`watching post '${name}' on ${HUB} (Ctrl-C to stop)`)
+        while (true) {
+          let body: { messages?: MessageRow[]; error?: string }
+          try {
+            const res = await fetch(`${HUB}/api/post/check`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', ...AUTH },
+              body: JSON.stringify({ name, wait: 60 }),
+              signal: AbortSignal.timeout(90_000), // above the hub's wait, below its 150s request timeout
+            })
+            if (res.status === 401) fail(`hub (${HUB}) rejected the request — export the hub's HATO_TOKEN`)
+            body = (await res.json()) as typeof body
+          } catch {
+            console.error(`hub unreachable (${HUB}) — retrying in 5s`)
+            await Bun.sleep(5000)
+            continue
+          }
+          if (body.error) fail(body.error) // post removed, or never existed
+          for (const m of body.messages ?? []) printPostMessage(m, asJson)
+        }
+        break
+      }
+
+      case 'rm': {
+        const name = words[0]
+        if (!name) fail(USAGE)
+        const res = await post('/api/post/rm', { name })
+        const body = (await res.json()) as { dropped?: number; error?: string }
+        if (body.error) fail(body.error)
+        console.log(`removed post '${name}'${body.dropped ? ` (dropped ${body.dropped} unread messages)` : ''}`)
+        break
+      }
+
+      default:
+        fail(USAGE)
+    }
     break
   }
 

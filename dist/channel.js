@@ -14080,7 +14080,7 @@ var SESSION_ID = randomUUID();
 var assignedName = process.env.HATO_NAME ?? null;
 var log = (msg) => process.stderr.write(`hato channel: ${msg}
 `);
-var mcp = new Server({ name: "hato", version: "0.6.1" }, {
+var mcp = new Server({ name: "hato", version: "0.7.0" }, {
   capabilities: {
     tools: {},
     experimental: { "claude/channel": {} }
@@ -14090,7 +14090,10 @@ var mcp = new Server({ name: "hato", version: "0.6.1" }, {
     "",
     'Messages from other sessions arrive as <channel source="hato" chat_id="<sender>" ...>.',
     'Reply with the hato_send tool, passing the chat_id (the sender session name) as `to`. Use to="*" to broadcast.',
-    "hato_list shows current sessions (name, host, cwd, working/idle, status).",
+    "hato_list shows current sessions (name, host, cwd, working/idle, status) and posts (\uD83D\uDCEE).",
+    "A post is a mailbox with no session behind it \u2014 agents that cannot receive channel injections",
+    "(Codex, scripts) poll it with the `hato post check/watch` CLI. Sending to a post name just",
+    "queues the message for pickup. Create one with `hato post new <name>` (Bash).",
     "When starting long work, update your title/status with hato_status so other sessions can see it.",
     "The hub assigns each session a random bird name; change it with hato_rename.",
     "",
@@ -14104,7 +14107,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: "hato_send",
-      description: 'Send a message to another Claude Code session. `to` is a session name (see hato_list or the chat_id of a received message), or "*" to broadcast to all online sessions. Direct messages to an offline session are queued and delivered when it comes back online.',
+      description: 'Send a message to another Claude Code session or a post (\uD83D\uDCEE mailbox polled by non-Claude agents). `to` is a session/post name (see hato_list or the chat_id of a received message), or "*" to broadcast to all online sessions and posts. Direct messages to an offline session are queued and delivered when it comes back online.',
       inputSchema: {
         type: "object",
         properties: {
@@ -14116,7 +14119,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "hato_list",
-      description: "List Claude Code sessions registered with hato (name, host, cwd, working/idle, status, online state).",
+      description: "List Claude Code sessions registered with hato (name, host, cwd, working/idle, status, online state) and posts (\uD83D\uDCEE mailboxes with their waiting-message counts).",
       inputSchema: { type: "object", properties: {} }
     },
     {
@@ -14163,16 +14166,27 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       const body = await res.json();
       if (body.error)
         return text(`send failed: ${body.error}`);
-      if (body.result === "broadcast")
-        return text(`broadcast sent (delivered to ${body.delivered} sessions)`);
+      if (body.result === "broadcast") {
+        return text(`broadcast sent (delivered to ${body.delivered} sessions${body.posted ? `, ${body.posted} posts` : ""})`);
+      }
+      if (body.result === "posted")
+        return text("posted (a \uD83D\uDCEE mailbox \u2014 waiting to be picked up by its consumer)");
       return text(body.result === "delivered" ? "delivered (recipient is online)" : "queued (recipient is offline \u2014 will be delivered when it comes back)");
     }
     case "hato_list": {
-      const res = await fetch(`${HUB}/api/sessions`, { headers: AUTH });
-      const { sessions } = await res.json();
-      if (sessions.length === 0)
+      const [sres, pres] = await Promise.all([
+        fetch(`${HUB}/api/sessions`, { headers: AUTH }),
+        fetch(`${HUB}/api/posts`, { headers: AUTH })
+      ]);
+      const { sessions } = await sres.json();
+      const { posts } = await pres.json();
+      if (sessions.length === 0 && posts.length === 0)
         return text("no sessions registered");
-      return text(sessions.map(fmtSession).join(`
+      const lines = [
+        ...sessions.map(fmtSession),
+        ...posts.map((p) => `\uD83D\uDCEE ${p.name}  ${p.waiting} waiting${p.watching ? " \u2014 being watched" : ""}${p.note ? `  [${p.note}]` : ""}`)
+      ];
+      return text(lines.join(`
 `));
     }
     case "hato_status": {

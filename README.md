@@ -27,6 +27,7 @@ delivered
 - **Wakes idle sessions** — messages arrive as real user turns via the `claude/channel` mechanism (the same one the official Discord plugin uses)
 - **Broadcast** — `to: "*"` reaches every online session at once
 - **Offline queue** — direct messages to offline sessions are delivered when they return
+- **Posts 📮** — standalone mailboxes: agents that can't receive injections (Codex, scripts, cron jobs) pick messages up by polling — `hato post watch` long-polls, so pickup is instant
 - **Live ledger** — who's online, working ⚡ or idle 💤, on which host, doing what
 - **Multi-host** — one hub, many machines (designed for a Tailnet)
 - **Bird names** — sessions get unique random names (`suzume`, `kounotori`, …); rename anytime
@@ -158,12 +159,37 @@ ln -sf ~/work/hato/cli/hato.ts ~/.local/bin/hato
 ### From a shell
 
 ```bash
-hato list                        # ● online / ○ offline, ⚡ working / 💤 idle, [title — status]
+hato list                        # ● online / ○ offline, ⚡ working / 💤 idle, [title — status], 📮 posts
 hato send suzume "build done?"   # direct message (queued if offline)
-hato broadcast "deploy at 15:00" # every online session
+hato broadcast "deploy at 15:00" # every online session + every post
 hato log [name] [-n 50]          # message history
 hato rename kounotori dev        # rename a session
 ```
+
+### Posts — mailboxes for agents outside Claude Code 📮
+
+A *post* is a named mailbox with no session behind it. Anything that can run a
+shell loop — a Codex session, a cron job, a plain script — can receive hato
+messages by watching one; no injection mechanism needed.
+
+```bash
+hato post new codex -m "codex on laptop"   # create (name is random if omitted)
+hato post watch codex                      # long-poll loop: prints messages as they arrive
+hato post check codex                      # one-shot: read waiting messages (--peek to keep them)
+hato post ls                               # 📮 codex  2 waiting 👀 (👀 = someone is watching)
+hato post rm codex
+```
+
+Sending is the same as to any session — `hato send codex "review is done"` from
+a shell, or `hato_send` from inside a Claude session. Messages wait in the hub
+(up to `HATO_MSG_TTL_DAYS`) until checked; `watch` gets them pushed within a
+second via long-poll. `--json` on `check`/`watch` emits one JSON object per
+line for scripts. Posts share the session namespace and never yield their name;
+they exist until `hato post rm`.
+
+For Codex specifically: run `hato post watch codex` next to it and feed what
+arrives into `codex exec resume <SESSION_ID> "<message>"`, or just check the
+post between turns.
 
 ### Show the session name in Claude Code (statusline)
 
@@ -184,8 +210,9 @@ echo "$LINE${HATO:+ | $HATO}"
 
 ### From inside a session
 
-Claude gets four tools: **`hato_send`** (`to: "*"` broadcasts), **`hato_list`**,
-**`hato_status`** (publish title/status to the ledger), **`hato_rename`**.
+Claude gets four tools: **`hato_send`** (`to: "*"` broadcasts; a post name works
+too), **`hato_list`** (sessions and posts), **`hato_status`** (publish
+title/status to the ledger), **`hato_rename`**.
 
 Incoming messages look like `<channel source="hato" chat_id="suzume">…` — replying
 to `chat_id` with `hato_send` closes the loop.
@@ -213,9 +240,10 @@ to `chat_id` with `hato_send` closes the loop.
 - **`--channels` is per-launch.** With the plugin enabled, every session registers in the
   ledger and can *send*; only sessions launched with `--channels plugin:hato@hato`
   *receive* injections.
-- **Codex CLI can't join** (as of 2026-07): it has no injection mechanism and the
-  `codex inject` proposal was rejected. Closest workarounds: tmux `send-keys`, or an
-  adapter on `codex app-server` (JSON-RPC). One-shot appends work via
+- **Codex CLI can't join as a session** (as of 2026-07): it has no injection
+  mechanism and the `codex inject` proposal was rejected. That's what **posts**
+  are for — receive by polling (`hato post watch`) instead of being injected,
+  then feed messages in via tmux `send-keys` or
   `codex exec resume <SESSION_ID> "prompt"`.
 
 ## Development
