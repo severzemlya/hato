@@ -1,6 +1,6 @@
 {
   "name": "hato",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Carrier-pigeon messaging between Claude Code sessions",
   "type": "module",
   "license": "MIT",

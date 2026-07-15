@@ -130,13 +130,47 @@ function waitForPostMessage(name: string, ms: number): Promise<void> {
 
 // ---------- naming ----------
 
-// Bird name pool (Japanese). When exhausted, -2, -3, … suffixes are added.
+// Bird name pool (Japanese, grouped by family). When exhausted, -2, -3, … suffixes are added.
 const BIRD_NAMES = [
-  'suzume', 'tsubame', 'hibari', 'mozu', 'kawasemi', 'fukurou', 'taka', 'washi',
-  'tsuru', 'sagi', 'kamome', 'chidori', 'uguisu', 'mejiro', 'hiyodori', 'kiji',
-  'yamagara', 'shijuukara', 'enaga', 'kogera', 'misosazai', 'komadori',
-  'ruribitaki', 'kawarahiwa', 'ikaru', 'hojiro', 'kakesu', 'onaga', 'sekirei',
-  'tobi', 'hayabusa', 'kounotori', 'toki', 'kamo', 'ahiru', 'ousama-penguin',
+  // small songbirds & garden birds
+  'suzume', 'tsubame', 'hibari', 'mozu', 'uguisu', 'mejiro', 'hiyodori',
+  'yamagara', 'shijuukara', 'enaga', 'higara', 'kogara', 'gojuukara',
+  'misosazai', 'komadori', 'ruribitaki', 'kawarahiwa', 'ikaru', 'hojiro',
+  'kikuitadaki', 'benimashiko', 'kirenjaku', 'hirenjaku', 'ooruri', 'kibitaki',
+  'kibashiri', 'sekirei', 'kisekirei', 'hakusekirei', 'segurosekirei',
+  'tsugumi', 'shirohara', 'akahara', 'kuroji', 'aoji', 'kashiradaka',
+  'mukudori', 'bunchou', 'kanariya', 'hachidori', 'kawagarasu',
+  // corvids
+  'kakesu', 'onaga', 'karasu', 'hashibutogarasu', 'hashibosogarasu', 'miyamagarasu',
+  // woodpeckers
+  'kogera', 'akagera', 'aogera', 'kumagera',
+  // kingfishers
+  'kawasemi', 'yamasemi', 'akashoubin',
+  // raptors & owls
+  'taka', 'washi', 'tobi', 'hayabusa', 'fukurou',
+  'washimimizuku', 'shirofukurou', 'menfukurou', 'aobazuku', 'konohazuku',
+  // cuckoos, swifts, nightjars
+  'kakkou', 'hototogisu', 'tsutsudori', 'juuichi', 'yotaka',
+  'amatsubame', 'iwatsubame',
+  // pigeons, doves, pheasants & gamebirds
+  'kijibato', 'kiji', 'yamadori', 'kojukei', 'uzura', 'raichou',
+  // cranes, storks, ibis
+  'tsuru', 'tanchou', 'manazuru', 'nabezuru', 'kounotori', 'toki',
+  // herons & egrets
+  'sagi', 'shirasagi', 'daisagi', 'chuusagi', 'kosagi',
+  'aosagi', 'goisagi', 'amasagi',
+  // shorebirds
+  'chidori', 'keri', 'daizen', 'shigi', 'yamashigi',
+  // gulls & terns
+  'kamome', 'yurikamome', 'umineko', 'ajisashi',
+  // ducks, geese, swans, cormorants & grebes
+  'kamo', 'ahiru', 'karugamo', 'magamo', 'onagagamo', 'hidorigamo',
+  'hashibirogamo', 'suzugamo', 'kinkurohajiro', 'oshidori',
+  'hakuchou', 'oohakuchou', 'kohakuchou', 'kokuchou',
+  'gan', 'magan', 'hishikui', 'kaitsuburi', 'kawau', 'umiu',
+  // exotic, tropical & flightless
+  'pengin', 'ahoudori', 'dachou', 'emu', 'kiwi', 'dodo',
+  'kujaku', 'oumu', 'inko', 'oohashi', 'furamingo', 'perikan',
 ]
 
 const sanitizeName = (s: string) =>
