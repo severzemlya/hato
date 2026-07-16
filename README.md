@@ -237,6 +237,23 @@ title/status to the ledger), **`hato_rename`**.
 Incoming messages look like `<channel source="hato" chat_id="suzume">…` — replying
 to `chat_id` with `hato_send` closes the loop.
 
+### Who stays in the list
+
+`hato list` is only useful while it stays short, so the ledger forgets aggressively:
+
+- a session that disconnects within `HATO_EPHEMERAL_SECS` (60s) having sent no
+  message and published no title/status is **dropped immediately** — it was a probe,
+  a health check or a one-shot run, not a peer. Its bird name goes back in the pool.
+- any other offline session is swept once it goes untouched for `HATO_SESSION_TTL_DAYS` (24h).
+
+If some tool on your machine launches Claude on a timer, the better fix is to keep
+hato out of it entirely — drop this next to it and the channel never starts:
+
+```json
+// <that tool's working directory>/.claude/settings.local.json
+{ "enabledPlugins": { "hato@hato": false } }
+```
+
 ### Configuration
 
 | env var | default | |
@@ -247,7 +264,8 @@ to `chat_id` with `hato_send` closes the loop.
 | `HATO_TOKEN` | *(unset = open)* | shared token; when set on the hub, `/api` and `/ws` require `Authorization: Bearer` — export the same value on every machine |
 | `HATO_DATA_DIR` | `~/.local/share/hato` | hub SQLite location |
 | `HATO_MSG_TTL_DAYS` | `7` | messages older than this are swept |
-| `HATO_SESSION_TTL_DAYS` | `14` | offline session rows older than this are swept |
+| `HATO_SESSION_TTL_DAYS` | `1` | offline session rows older than this are swept (fractions are fine — `0.5` is 12h) |
+| `HATO_EPHEMERAL_SECS` | `60` | a session that lived this briefly and left no trace is forgotten on disconnect rather than kept (`0` disables) |
 
 ## Caveats
 

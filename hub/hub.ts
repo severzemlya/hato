@@ -32,7 +32,12 @@ import { BROADCAST, DEFAULT_PORT, type ClientMsg, type MessageRow, type ServerMs
 const PORT = Number(process.env.HATO_PORT ?? DEFAULT_PORT)
 const DATA_DIR = process.env.HATO_DATA_DIR ?? join(homedir(), '.local', 'share', 'hato')
 const MSG_TTL_DAYS = Number(process.env.HATO_MSG_TTL_DAYS ?? 7)
-const SESSION_TTL_DAYS = Number(process.env.HATO_SESSION_TTL_DAYS ?? 14)
+// Offline sessions age out of the ledger after this long (fractional days are fine)
+const SESSION_TTL_DAYS = Number(process.env.HATO_SESSION_TTL_DAYS ?? 1)
+// A session that came and went within this many seconds without ever exchanging a
+// message or publishing a title/status was a probe, a script or a one-shot run —
+// not a peer worth remembering. 0 disables the rule.
+const EPHEMERAL_SECS = Number(process.env.HATO_EPHEMERAL_SECS ?? 60)
 const TOKEN = process.env.HATO_TOKEN // when set, /api and /ws require Authorization: Bearer <token>
 mkdirSync(DATA_DIR, { recursive: true })
 
@@ -347,6 +352,27 @@ function broadcast(fromName: string, content: string): { delivered: number; post
   return { delivered, posted }
 }
 
+// ---------- forgetting ----------
+
+/**
+ * True for a session the ledger is better off not keeping: it was around only
+ * briefly and left no trace — no message either way, no title, no status.
+ * Tools that spawn a Claude session on a timer (status probes, health checks,
+ * CI one-shots) would otherwise pile up a new bird name every run and hold it
+ * for the whole session TTL, crowding out the real sessions in `hato list`.
+ */
+function isEphemeral(session: SessionRow): boolean {
+  if (EPHEMERAL_SECS <= 0) return false
+  if (Date.now() - Date.parse(session.first_seen) >= EPHEMERAL_SECS * 1000) return false
+  if (session.title || session.status) return false
+  const spoke = db
+    .query<{ n: number }, [string, string]>(
+      'SELECT COUNT(*) AS n FROM messages WHERE from_name = ? OR to_name = ?',
+    )
+    .get(session.name, session.name)
+  return !spoke?.n
+}
+
 // ---------- TTL sweep ----------
 
 function sweep() {
@@ -578,6 +604,11 @@ const server = Bun.serve<WsData, {}>({
       // the old, dead socket must not knock the freshly-reconnected session offline.
       if (socketsBySessionId.get(session.id) !== ws) return
       socketsBySessionId.delete(session.id)
+      if (isEphemeral(session)) {
+        db.query('DELETE FROM sessions WHERE id = ?').run(session.id)
+        console.log(`[hato] - ${session.name} (ephemeral — forgotten)`)
+        return
+      }
       db.query('UPDATE sessions SET online = 0, last_seen = ? WHERE id = ?').run(now(), session.id)
       console.log(`[hato] - ${session.name}`)
     },
