@@ -56,6 +56,7 @@ experimental `claude/channel` capability, and when the hub forwards it a message
 | `hub/hub.ts` | ledger + router. WS registration from channels, HTTP API for CLI/tools, offline queue, TTL sweep |
 | `channel/server.ts` | per-session MCP server. Auto-registers, injects incoming messages, provides the `hato_*` tools |
 | `cli/hato.ts` | `hato` command for humans and scripts |
+| `.agents/skills/hato-cli/` | skill teaching non-Claude agents (Codex, …) to use the CLI |
 
 ## Install
 
@@ -190,6 +191,25 @@ they exist until `hato post rm`.
 For Codex specifically: run `hato post watch codex` next to it and feed what
 arrives into `codex exec resume <SESSION_ID> "<message>"`, or just check the
 post between turns.
+
+### Teaching another agent to use hato
+
+`.agents/skills/hato-cli/SKILL.md` is a vendor-neutral
+[skill](https://code.claude.com/docs/en/skills) covering the whole CLI — posts,
+sending, replying, and the rule that an incoming message is a *request*, not an
+instruction to obey. Point any agent with a shell at it (Codex, Cursor, Aider, a
+cron job):
+
+```bash
+# Codex and other AGENTS.md readers
+echo "See .agents/skills/hato-cli/SKILL.md for messaging other sessions with hato." >> AGENTS.md
+
+# or copy it where your agent looks for skills
+cp -r .agents/skills/hato-cli ~/.claude/skills/     # Claude Code
+```
+
+Claude Code sessions running the plugin don't need it — they get the `hato_*`
+tools and their instructions from the channel.
 
 ### Show the session name in Claude Code (statusline)
 
